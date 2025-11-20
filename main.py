@@ -1,8 +1,14 @@
 import os
-from fastapi import FastAPI
+from datetime import datetime
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional
 
-app = FastAPI()
+# Database helpers (provided in environment)
+from database import create_document, get_documents
+
+app = FastAPI(title="Vivo Pizza Event Service API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,58 +18,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Pydantic models (API layer)
+class InquiryModel(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    email: EmailStr
+    phone: str = Field(..., min_length=5, max_length=40)
+    event_date: str
+    guests: int = Field(..., ge=1, le=1000)
+    location: str = Field(..., min_length=2, max_length=200)
+    event_type: str = Field(..., min_length=2, max_length=100)
+    message: Optional[str] = Field(None, max_length=2000)
+
+class InquiryResponse(BaseModel):
+    id: str
+    status: str
+
+REGIONS: List[str] = [
+    "Bregenz", "Dornbirn", "Feldkirch", "Bludenz", "Montafon", "Bregenzerwald"
+]
+
 @app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+def root():
+    return {"status": "ok", "service": "Vivo Pizza Event Service API", "regions": REGIONS}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+@app.get("/regions", response_model=List[str])
+def get_regions():
+    return REGIONS
 
-@app.get("/test")
-def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
-    }
-    
+@app.post("/inquiry", response_model=InquiryResponse)
+async def create_inquiry(payload: InquiryModel):
     try:
-        # Try to import database module
-        from database import db
-        
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+        doc = payload.model_dump()
+        doc["status"] = "new"
+        doc["created_at"] = datetime.utcnow().isoformat()
+        created = await create_document("inquiry", doc)
+        # create_document returns inserted document with _id or id
+        inserted_id = str(created.get("_id") or created.get("id") or "")
+        if not inserted_id:
+            raise ValueError("No ID returned from database")
+        return {"id": inserted_id, "status": "received"}
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        raise HTTPException(status_code=500, detail=f"Failed to store inquiry: {str(e)[:200]}")
 
+# Optional diagnostic
+@app.get("/test")
+def test():
+    return {"backend": "running", "regions": REGIONS}
 
 if __name__ == "__main__":
     import uvicorn
